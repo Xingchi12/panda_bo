@@ -205,8 +205,8 @@ def build_gp_model(
     # good-region signal (0.42 sd after the log10 transform) so the GP cannot
     # explain real structure away as noise; raise it if fits stop converging.
     # likelihood = GaussianLikelihood(noise_constraint=Interval(1e-8, 1e-4))
-    # likelihood = GaussianLikelihood(noise_constraint=Interval(1e-8, 1e-2))
-    likelihood = GaussianLikelihood()
+    likelihood = GaussianLikelihood(noise_constraint=Interval(1e-8, 1e-2))
+    # likelihood = GaussianLikelihood()
 
     covar_module = ScaleKernel(
         MaternKernel(
