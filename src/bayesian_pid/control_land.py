@@ -1,20 +1,14 @@
-#!/usr/bin/env python3
 """
 Created on Fri Jun 12 10:21:53 2026
 
 @author: Xingchi Liu
 
-TurBO with second order state transistion model as the response
-
 Use the one-direction trajectory as the demand
 
 Here the PID is based on Brett's implementation'
-@author: ubuntu
 
-Run with `python -m bayesian_pid.run`. Everything below the configuration block
-lives in functions, so importing this module has no side effects — it neither
-clears the terminal, loads data, redirects stdout, nor prompts for input.
-
+Run with `python -m bayesian_pid.Control_land`. To create sobol smaples
+in the defined parameter space. It is defined as 'TOTAL_SAMPLE'.
 Pass --sim-only to make every hardware path unreachable, for unattended runs.
 """
 
@@ -40,7 +34,6 @@ import torch
 from bayesian_pid.hardware import HardwareEvaluator
 from bayesian_pid.metrics import DEFAULT_WINDOW
 from bayesian_pid.optimiser import (
-    run_mc_optimisation,
     run_one_optimization,
     select_warm_start,
 )
@@ -53,10 +46,15 @@ from bayesian_pid.panda import (
     read_pid_values,
     validate_bounds,
 )
-from bayesian_pid.plotting import plot_mc_result, plot_single_result
+from bayesian_pid.plotting import plot_single_result
+from bayesian_pid.random_scan import save_sobol_dataset, sobol_sample_and_evaluate
 from bayesian_pid.sim import Array
 from bayesian_pid.utils import DEFAULT_BO_THREADS
 from bayesian_pid.validation import as_pid_vector, evaluate
+
+# ============================================================
+# The code is for generating sample of parameters combinations
+# Then get the corresponding FE and visualise the FE landscape
 
 # ============================================================
 # Configuration — this is the only block to edit
@@ -68,7 +66,6 @@ DATA_PATH = "/workspaces/panda_bo/data"
 # Which identified plant model to simulate against. The trajectory must be the
 # one the model was identified from.
 PLANT_SUFFIX = "_3.5v"  # "" for the 1v_1 data set, "_3.5v" for 3.5v_1
-# PLANT_SUFFIX = "_3.5v_TLS"  # "" for the 1v_1 data set, "_3.5v" for 3.5v_1
 TRAJECTORY_FILE = "xonly_trajectory.npy"
 
 # Output and integral limits, read from the live device (BRETT_PID.MAX_OUTPUT_I
@@ -141,10 +138,10 @@ METHOD = "Turbo"  # change to "standard_bo" for ordinary BO without trust region
 RUN_MC = True  # False: one optimisation run; True: MC runs over different seeds
 N_MC_RUNS = 50  # How many MC runs
 SEED0 = 1  # MC seeds will be SEED0, SEED0+1, ..., SEED0+N_MC_RUNS-1
-TOTAL_BUDGET = 100  # total number of function evaluations per simulated run
-LIVE_BUDGET = 100  # total number of function evaluations per live run
+TOTAL_BUDGET = 1  # total number of function evaluations per simulated run
+LIVE_BUDGET = 1  # total number of function evaluations per live run
 N_INIT = 10  # initial Sobol points per run/restart
-
+TOTAL_SAMPLE = 2**17  # number of random samples
 # -------------------------------------------------------
 # BO loop compute.
 #
@@ -491,28 +488,44 @@ def run_simulation(
     """
     dim = len(param_names)
     if RUN_MC:
-        mc_results = run_mc_optimisation(
-            sim_evaluate_fn,
-            bounds_phys,
+        # mc_results = run_mc_optimisation(
+        #     sim_evaluate_fn,
+        #     bounds_phys,
+        #     dim=dim,
+        #     method=METHOD,
+        #     dtype=DTYPE,
+        #     device=DEVICE,
+        #     n_runs=N_MC_RUNS,
+        #     seed0=SEED0,
+        #     total_budget=TOTAL_BUDGET,
+        #     n_init=N_INIT,
+        #     verbose=False,
+        #     save_csv=SAVE_MC_CSV,
+        #     results_dir=results_dir,
+        #     param_names=param_names,
+        #     progress_fn=progress_fn,
+        #     n_jobs=MC_JOBS,
+        #     torch_threads=BO_THREADS,
+        # )
+        # plot_mc_result(mc_results, uncertainty="std", save_dir=results_dir)
+        # # Use the best individual MC run for the final trajectory re-simulation.
+        # return min(mc_results["run_results"], key=lambda r: r["best_y"])
+        x, y = sobol_sample_and_evaluate(
+            evaluate_fn=sim_evaluate_fn,
+            bounds_phys=bounds_phys,
             dim=dim,
-            method=METHOD,
+            n_samples=TOTAL_SAMPLE,
             dtype=DTYPE,
             device=DEVICE,
-            n_runs=N_MC_RUNS,
-            seed0=SEED0,
-            total_budget=TOTAL_BUDGET,
-            n_init=N_INIT,
-            verbose=False,
-            save_csv=SAVE_MC_CSV,
-            results_dir=results_dir,
-            param_names=param_names,
-            progress_fn=progress_fn,
-            n_jobs=MC_JOBS,
-            torch_threads=BO_THREADS,
+            seed=SEED0,
         )
-        plot_mc_result(mc_results, uncertainty="std", save_dir=results_dir)
-        # Use the best individual MC run for the final trajectory re-simulation.
-        return min(mc_results["run_results"], key=lambda r: r["best_y"])
+
+        save_sobol_dataset(
+            "sobol_data.csv",
+            x,
+            y,
+            param_names=param_names,
+        )
 
     result: dict[str, Any] = run_one_optimization(
         sim_evaluate_fn,

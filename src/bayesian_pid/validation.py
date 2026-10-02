@@ -6,10 +6,12 @@ import numpy as np
 import torch
 from botorch.fit import fit_gpytorch_mll  # pyright: ignore[reportUnknownVariableType]
 from botorch.models import SingleTaskGP
+from botorch.models.transforms.input import Warp
 from gpytorch.constraints import Interval
 from gpytorch.kernels import MaternKernel, ScaleKernel
 from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.mlls import ExactMarginalLogLikelihood
+from gpytorch.priors.torch_priors import LogNormalPrior
 
 from bayesian_pid.metrics import following_error_score
 from bayesian_pid.sim import Array, simulate_pid_fast
@@ -188,15 +190,23 @@ def build_gp_model(
     # (sd 0.0072) then swamped 5x over. That is the "noise floor" — an artefact
     # of the transform, not physics. log10 gives the same region 12.5% of the
     # range and 0.42 sd, ~290x more resolution where it matters.
+
     train_y_log = torch.log10(train_y.clamp_min(objective_floor))
     y_std = train_y_log.std(correction=0).clamp_min(1e-8)
     y = (train_y_log - train_y_log.mean()) / y_std
+
+    # no log transfer
+    # train_y = train_y.clamp_min(objective_floor)
+    # y_std = train_y.std(correction=0).clamp_min(1e-8)
+    # y = (train_y - train_y.mean()) / y_std
 
     # The simulator is deterministic, so observation noise exists only for
     # numerical conditioning. The upper bound is kept well below the
     # good-region signal (0.42 sd after the log10 transform) so the GP cannot
     # explain real structure away as noise; raise it if fits stop converging.
-    likelihood = GaussianLikelihood(noise_constraint=Interval(1e-8, 1e-4))
+    # likelihood = GaussianLikelihood(noise_constraint=Interval(1e-8, 1e-4))
+    # likelihood = GaussianLikelihood(noise_constraint=Interval(1e-8, 1e-2))
+    likelihood = GaussianLikelihood()
 
     covar_module = ScaleKernel(
         MaternKernel(
@@ -206,19 +216,44 @@ def build_gp_model(
         )
     )
 
+    # gp = SingleTaskGP(
+    #     train_X=train_x,
+    #     train_Y=y,
+    #     covar_module=covar_module,
+    #     likelihood=likelihood,
+    #     # Explicitly None. botorch >=0.12 defaults this to DEFAULT, which applies
+    #     # Standardize(m=1) internally — so leaving it unset standardised y a
+    #     # second time, on top of the log1p-and-standardise done above. The double
+    #     # transform very nearly cancels (Standardize inverts itself in
+    #     # untransform_posterior), but it put the GP's actual training targets and
+    #     # the noise/lengthscale constraints on a different scale than this
+    #     # function's docstring claims.
+    #     outcome_transform=None,
+    # )
+
+    # A more flexible warper
+    # warp_tf = MonotoneSplineWarp(d=train_x.shape[-1], num_bins=3, prior_sd=0.5).to(
+    #     train_x
+    # )
+
+    # a standard warper, worked well on the surrogate, simpler to learn
+    warp_tf = Warp(
+        d=train_x.shape[-1],
+        indices=list(range(train_x.shape[-1])),
+        # use a prior with median at 1.
+        # when a=1 and b=1, the Kumaraswamy CDF is the identity function
+        concentration1_prior=LogNormalPrior(0.0, 0.75**0.5),
+        concentration0_prior=LogNormalPrior(0.0, 0.75**0.5),
+        bounds=torch.tensor([[0.0] * 7, [1.0] * 7]),
+    )
     gp = SingleTaskGP(
         train_X=train_x,
         train_Y=y,
         covar_module=covar_module,
         likelihood=likelihood,
-        # Explicitly None. botorch >=0.12 defaults this to DEFAULT, which applies
-        # Standardize(m=1) internally — so leaving it unset standardised y a
-        # second time, on top of the log1p-and-standardise done above. The double
-        # transform very nearly cancels (Standardize inverts itself in
-        # untransform_posterior), but it put the GP's actual training targets and
-        # the noise/lengthscale constraints on a different scale than this
-        # function's docstring claims.
+        input_transform=warp_tf,
         outcome_transform=None,
+        # outcome_transform=Standardize(m=1), # newly added
     )
 
     mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
